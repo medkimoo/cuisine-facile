@@ -134,50 +134,72 @@ export default function App() {
 
   // Résumé nutritionnel
   const [showNutritionSummary, setShowNutritionSummary] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
+  const [planSaved, setPlanSaved] = useState(false);
+  const [coursesSaved, setCoursesSaved] = useState(false);
+  const [recipesSaved, setRecipesSaved] = useState(false);
 
   // =============================================
   // AUTH + FOYER INIT
   // =============================================
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    // onAuthStateChange gère TOUS les cas : session existante, OAuth return, sign in/out
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      console.log('[Auth] Event:', event, 'User:', session?.user?.email || 'none');
+
       if (session?.user) {
         setUser(session.user);
-        loadFoyer(session.user.id);
-      } else {
+        // Utiliser setTimeout pour éviter un deadlock avec les appels Supabase
+        // pendant le callback onAuthStateChange
+        setTimeout(() => loadFoyer(session.user.id), 0);
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
+        setFoyer(null);
+        setAuthLoading(false);
+      } else if (event === 'INITIAL_SESSION' && !session) {
+        // Pas de session au démarrage
+        console.log('[Auth] Pas de session active');
         setAuthLoading(false);
       }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        setUser(session.user);
-        loadFoyer(session.user.id);
-      } else {
-        setUser(null);
-        setFoyer(null);
-        setAuthLoading(false);
-      }
-    });
+    // Nettoyer l'URL après un retour OAuth (les # et ? params)
+    if (window.location.hash || window.location.search.includes('code=')) {
+      setTimeout(() => {
+        window.history.replaceState({}, '', window.location.pathname);
+      }, 1000);
+    }
 
     return () => subscription.unsubscribe();
   }, []);
 
   const loadFoyer = async (userId) => {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('*, foyers(*)')
-      .eq('id', userId)
-      .single();
+    try {
+      const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('*, foyers(*)')
+        .eq('id', userId)
+        .single();
 
-    if (profile?.foyers) {
-      setFoyer(profile.foyers);
-      await loadRecettes(profile.foyers.id);
-      await loadPlanification(profile.foyers.id);
-      await loadCourses(profile.foyers.id);
-      if (profile.foyers.temps_defaut_midi || profile.foyers.temps_defaut_soir) {
-        // Les temps sont chargés depuis le foyer (on garde les defaults par jour)
+      if (error) {
+        console.warn('[Foyer] Erreur chargement profil:', error.message);
+        // Table profiles n'existe peut-être pas encore - c'est ok
       }
+
+      if (profile?.foyers) {
+        setFoyer(profile.foyers);
+        if (profile.foyers.settings?.defaultTimes) {
+          setDefaultTimes(profile.foyers.settings.defaultTimes);
+        }
+        await loadRecettes(profile.foyers.id);
+        await loadPlanification(profile.foyers.id);
+        await loadCourses(profile.foyers.id);
+      } else {
+        console.log('[Foyer] Pas de foyer associé, affichage écran Foyer');
+      }
+    } catch (err) {
+      console.error('[Foyer] Erreur inattendue:', err);
     }
     setAuthLoading(false);
   };
@@ -188,7 +210,37 @@ export default function App() {
       .select('*, ingredients(*)')
       .eq('foyer_id', foyerId)
       .order('created_at', { ascending: false });
-    if (data && data.length > 0) setRecipes(data);
+      
+    if (data && data.length > 0) {
+      setRecipes(data);
+    } else {
+      setRecipes(INITIAL_RECIPES); // Optimistic initial render
+      for (const recipe of INITIAL_RECIPES) {
+        const { data: savedRecette } = await supabase.from('recettes').insert({
+          foyer_id: foyerId, nom: recipe.nom, categorie: recipe.categorie,
+          prep_time: recipe.prep_time, cook_time: recipe.cook_time,
+          portions_defaut: recipe.portions_defaut, tags: recipe.tags,
+          instructions: recipe.instructions
+        }).select().single();
+
+        if (savedRecette && recipe.ingredients?.length > 0) {
+          await supabase.from('ingredients').insert(
+            recipe.ingredients.map((ing, i) => ({ 
+              recette_id: savedRecette.id, nom: ing.nom, 
+              quantite: ing.quantite, unite: ing.unite, 
+              rayon: ing.rayon, ordre: i 
+            }))
+          );
+        }
+      }
+      
+      const { data: newData } = await supabase
+        .from('recettes')
+        .select('*, ingredients(*)')
+        .eq('foyer_id', foyerId)
+        .order('created_at', { ascending: false });
+      if (newData) setRecipes(newData);
+    }
   };
 
   const loadPlanification = async (foyerId) => {
@@ -216,7 +268,7 @@ export default function App() {
       });
       setPlan(Object.values(planMap));
     } else {
-      // Générer un plan local si rien en base
+      // Générer un plan local avec les recettes par défaut
       setPlan(generateSmartPlan(INITIAL_RECIPES, { lunch: { 1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 30, 0: 45 }, dinner: { 1: 30, 2: 30, 3: 30, 4: 30, 5: 30, 6: 45, 0: 60 } }));
     }
   };
@@ -228,8 +280,16 @@ export default function App() {
       .eq('foyer_id', foyerId);
     if (data) {
       const checked = {};
-      data.forEach(item => { if (item.coche) checked[item.ingredient_nom] = true; });
+      const loadedCustoms = [];
+      data.forEach(item => { 
+        if (item.ingredient_nom.startsWith('[CUSTOM]')) {
+          const nom = item.ingredient_nom.substring(8);
+          loadedCustoms.push({ id: item.ingredient_nom, nom, quantite: '', unite: '', rayon: item.rayon || 'Divers', isCustom: true });
+        }
+        if (item.coche) checked[item.ingredient_nom] = true; 
+      });
       setCheckedItems(checked);
+      setCustomItems(loadedCustoms);
     }
   };
 
@@ -387,7 +447,11 @@ export default function App() {
   const deleteRecipe = async (id) => {
     if (!window.confirm("Supprimer cette recette ?")) return;
     setRecipes(recipes.filter(r => r.id !== id));
-    if (foyer) await supabase.from('recettes').delete().eq('id', id);
+    if (foyer) {
+      await supabase.from('planification').delete().eq('recette_id', id);
+      await supabase.from('ingredients').delete().eq('recette_id', id);
+      await supabase.from('recettes').delete().eq('id', id);
+    }
   };
 
   const toggleTag = (tagId) => {
@@ -444,11 +508,30 @@ export default function App() {
     }
   };
 
-  const addCustomItem = (e) => {
+  const addCustomItem = async (e) => {
     e.preventDefault();
-    if (!newItemName.trim()) return;
-    setCustomItems([...customItems, { id: `custom_${Date.now()}`, nom: newItemName.trim(), quantite: '', unite: '', rayon: newItemRayon, isCustom: true }]);
+    const name = newItemName.trim();
+    if (!name) return;
+    
+    // Check if duplicate maybe
+    const dbKey = `[CUSTOM]${name}`;
+    const isDuplicate = customItems.some(i => i.id === dbKey);
+    if (isDuplicate) return;
+
+    const newItem = { id: dbKey, nom: name, quantite: '', unite: '', rayon: newItemRayon, isCustom: true };
+    setCustomItems([...customItems, newItem]);
     setNewItemName('');
+
+    if (foyer) {
+      await supabase.from('liste_courses').upsert({
+        foyer_id: foyer.id, 
+        ingredient_nom: dbKey, 
+        coche: false,
+        quantite: 1, 
+        unite: '', 
+        rayon: newItemRayon
+      }, { onConflict: 'foyer_id,ingredient_nom' });
+    }
   };
 
   // =============================================
@@ -562,10 +645,16 @@ export default function App() {
       <div className="p-4 space-y-4">
         {/* Actions */}
         <div className="flex gap-2">
-          <button onClick={handleGeneratePlan} className="flex-1 bg-amber-500 text-white font-bold py-3 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2">
-            <RefreshCw size={18} /> Générer le planning
+          <button onClick={handleGeneratePlan} className="flex-1 bg-amber-500 text-white font-bold py-3 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2 text-sm">
+            <RefreshCw size={18} /> Générer
           </button>
-          <button onClick={() => setShowNutritionSummary(!showNutritionSummary)} className="w-12 h-12 bg-green-100 text-green-700 rounded-xl flex items-center justify-center hover:bg-green-200">
+          <button onClick={() => {
+            setPlanSaved(true);
+            setTimeout(() => setPlanSaved(false), 2000);
+          }} className="flex-1 bg-green-500 text-white font-bold py-3 rounded-xl hover:bg-green-600 transition-colors flex items-center justify-center gap-2 text-sm">
+            <Save size={18} /> {planSaved ? 'Enregistré ✅' : 'Enregistrer'}
+          </button>
+          <button onClick={() => setShowNutritionSummary(!showNutritionSummary)} className="w-12 h-12 bg-green-100 text-green-700 rounded-xl flex items-center justify-center hover:bg-green-200 flex-shrink-0">
             <Leaf size={20} />
           </button>
         </div>
@@ -664,7 +753,18 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3">
+        <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-3 mt-2">
+          {/* Bouton de sauvegarde globale */}
+          <div className="flex justify-between items-center bg-white p-3 rounded-2xl shadow-sm border border-gray-100 mb-2">
+            <span className="text-sm font-bold text-gray-700">Votre carnet de recettes</span>
+            <button onClick={() => {
+              setRecipesSaved(true);
+              setTimeout(() => setRecipesSaved(false), 2000);
+            }} className="bg-amber-100 text-amber-700 px-4 py-2 rounded-xl text-xs font-bold hover:bg-amber-200 transition-colors flex items-center gap-2">
+              <Save size={14} /> {recipesSaved ? 'Enregistré ✅' : 'Enregistrer'}
+            </button>
+          </div>
+
           <button
             onClick={() => openRecipeForm()}
             className="w-full border-2 border-dashed border-amber-300 text-amber-600 font-bold py-4 rounded-2xl hover:bg-amber-50 flex items-center justify-center gap-2"
@@ -724,8 +824,11 @@ export default function App() {
     const listByRayon = getShoppingListByRayon();
     const allCustom = [...customItems];
     if (allCustom.length > 0) {
-      if (!listByRayon['Divers']) listByRayon['Divers'] = {};
-      allCustom.forEach(item => { listByRayon['Divers'][item.id] = item; });
+      allCustom.forEach(item => { 
+        const r = item.rayon || 'Divers';
+        if (!listByRayon[r]) listByRayon[r] = {};
+        listByRayon[r][item.id] = item; 
+      });
     }
 
     const orderedRayons = RAYONS.map(r => r.id).filter(r => listByRayon[r]);
@@ -733,6 +836,17 @@ export default function App() {
 
     return (
       <div className="p-4 space-y-4">
+        {/* Bouton de sauvegarde globale */}
+        <div className="flex justify-between items-center bg-white p-3 rounded-2xl shadow-sm border border-gray-100">
+          <span className="text-sm font-bold text-gray-700">Votre liste de courses</span>
+          <button onClick={() => {
+            setCoursesSaved(true);
+            setTimeout(() => setCoursesSaved(false), 2000);
+          }} className="bg-amber-100 text-amber-700 px-4 py-2 rounded-xl text-xs font-bold hover:bg-amber-200 transition-colors flex items-center gap-2">
+            <Save size={14} /> {coursesSaved ? 'Enregistrée ✅' : 'Enregistrer'}
+          </button>
+        </div>
+        
         {/* Ajouter un article */}
         <form onSubmit={addCustomItem} className="flex gap-2">
           <input
@@ -794,6 +908,15 @@ export default function App() {
   // ONGLET RÉGLAGES
   // =============================================
 
+  const saveSettings = async () => {
+    if (!foyer) return;
+    const updatedSettings = { ...(foyer.settings || {}), defaultTimes };
+    await supabase.from('foyers').update({ settings: updatedSettings }).eq('id', foyer.id);
+    setFoyer({ ...foyer, settings: updatedSettings });
+    setSettingsSaved(true);
+    setTimeout(() => setSettingsSaved(false), 2000);
+  };
+
   function renderSettingsTab() {
     const DAYS = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
     const TIME_OPTIONS = [15, 30, 45, 60, 90];
@@ -825,9 +948,14 @@ export default function App() {
 
         {/* Temps disponibles */}
         <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm">
-          <h2 className="font-black text-gray-800 mb-1 flex items-center gap-2">
-            <Clock size={18} className="text-amber-500" /> Temps disponible
-          </h2>
+          <div className="flex justify-between items-center mb-1">
+            <h2 className="font-black text-gray-800 flex items-center gap-2">
+              <Clock size={18} className="text-amber-500" /> Temps disponible
+            </h2>
+            <button onClick={saveSettings} className="bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-amber-200 transition-colors">
+              {settingsSaved ? 'Enregistré ✅' : 'Enregistrer'}
+            </button>
+          </div>
           <p className="text-xs text-gray-500 mb-4">Définit les recettes proposées selon votre disponibilité.</p>
 
           <div className="space-y-3">

@@ -51,10 +51,20 @@ export default function AuthScreen({ onAuth }) {
 
   const handleGoogleLogin = async () => {
     setError('');
-    await supabase.auth.signInWithOAuth({
+    setLoading(true);
+    const { data, error: err } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: window.location.origin }
+      options: {
+        redirectTo: window.location.origin,
+        queryParams: { prompt: 'select_account' }
+      }
     });
+    if (err) {
+      setLoading(false);
+      setError('Erreur Google : ' + err.message);
+      console.error('OAuth error:', err);
+    }
+    // Si pas d'erreur, le navigateur redirige vers Google
   };
 
   return (
