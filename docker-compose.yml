@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  cuisine-facile:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cuisine-facile-app
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  default:
+    name: cuisine-facile-network
