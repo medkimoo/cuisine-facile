@@ -3,7 +3,8 @@ import {
   Calendar, BookOpen, ShoppingCart, Settings, RefreshCw, Clock,
   ChefHat, Sun, Moon, Plus, CheckCircle2, Circle, X, Search, Edit2,
   Trash2, Save, PlusCircle, ArrowLeft, Home, Users, Copy, LogOut,
-  Tag, Filter, Layers, Star, Leaf, Fish, Beef, Zap, Coffee
+  Tag, Filter, Layers, Star, Leaf, Fish, Beef, Zap, Coffee,
+  ChevronLeft, ChevronRight, CalendarDays
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import AuthScreen from './screens/AuthScreen';
@@ -111,6 +112,8 @@ export default function App() {
 
   // --- APP STATE ---
   const [currentTab, setCurrentTab] = useState('plan');
+  const [planViewMode, setPlanViewMode] = useState('daily');
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0);
   const [recipes, setRecipes] = useState(INITIAL_RECIPES);
   const [plan, setPlan] = useState([]);
   const [defaultTimes, setDefaultTimes] = useState({
@@ -138,6 +141,14 @@ export default function App() {
   const [planSaved, setPlanSaved] = useState(false);
   const [coursesSaved, setCoursesSaved] = useState(false);
   const [recipesSaved, setRecipesSaved] = useState(false);
+
+  // Gestion du foyer
+  const [foyerMembers, setFoyerMembers] = useState([]);
+  const [foyerMembersCount, setFoyerMembersCount] = useState(1);
+  const [foyerAction, setFoyerAction] = useState(null); // null | 'leave' | 'delete' | 'join'
+  const [joinCode, setJoinCode] = useState('');
+  const [joinError, setJoinError] = useState('');
+  const [foyerActionLoading, setFoyerActionLoading] = useState(false);
 
   // =============================================
   // AUTH + FOYER INIT
@@ -192,9 +203,15 @@ export default function App() {
         if (profile.foyers.settings?.defaultTimes) {
           setDefaultTimes(profile.foyers.settings.defaultTimes);
         }
-        await loadRecettes(profile.foyers.id);
-        await loadPlanification(profile.foyers.id);
+        const recipesData = await loadRecettes(profile.foyers.id);
+        await loadPlanification(profile.foyers.id, recipesData);
         await loadCourses(profile.foyers.id);
+        const { data: members } = await supabase
+          .from('profiles')
+          .select('id, nom, email')
+          .eq('foyer_id', profile.foyers.id);
+        setFoyerMembers(members || []);
+        setFoyerMembersCount(members?.length || 1);
       } else {
         console.log('[Foyer] Pas de foyer associé, affichage écran Foyer');
       }
@@ -210,9 +227,10 @@ export default function App() {
       .select('*, ingredients(*)')
       .eq('foyer_id', foyerId)
       .order('created_at', { ascending: false });
-      
+
     if (data && data.length > 0) {
       setRecipes(data);
+      return data;
     } else {
       setRecipes(INITIAL_RECIPES); // Optimistic initial render
       for (const recipe of INITIAL_RECIPES) {
@@ -225,25 +243,26 @@ export default function App() {
 
         if (savedRecette && recipe.ingredients?.length > 0) {
           await supabase.from('ingredients').insert(
-            recipe.ingredients.map((ing, i) => ({ 
-              recette_id: savedRecette.id, nom: ing.nom, 
-              quantite: ing.quantite, unite: ing.unite, 
-              rayon: ing.rayon, ordre: i 
+            recipe.ingredients.map((ing, i) => ({
+              recette_id: savedRecette.id, nom: ing.nom,
+              quantite: ing.quantite, unite: ing.unite,
+              rayon: ing.rayon, ordre: i
             }))
           );
         }
       }
-      
+
       const { data: newData } = await supabase
         .from('recettes')
         .select('*, ingredients(*)')
         .eq('foyer_id', foyerId)
         .order('created_at', { ascending: false });
       if (newData) setRecipes(newData);
+      return newData || INITIAL_RECIPES;
     }
   };
 
-  const loadPlanification = async (foyerId) => {
+  const loadPlanification = async (foyerId, recipesData) => {
     const { data } = await supabase
       .from('planification')
       .select('*, recettes(*, ingredients(*))')
@@ -257,7 +276,7 @@ export default function App() {
       data.forEach(item => {
         const key = item.date;
         if (!planMap[key]) {
-          planMap[key] = { date: new Date(item.date), timeLunch: 30, timeDinner: 60, lunchRecipe: null, dinnerRecipe: null, isResteMidi: false };
+          planMap[key] = { date: new Date(item.date + 'T12:00:00'), timeLunch: 30, timeDinner: 60, lunchRecipe: null, dinnerRecipe: null, isResteMidi: false };
         }
         if (item.repas_type === 'midi') {
           planMap[key].lunchRecipe = item.recettes;
@@ -268,8 +287,20 @@ export default function App() {
       });
       setPlan(Object.values(planMap));
     } else {
-      // Générer un plan local avec les recettes par défaut
-      setPlan(generateSmartPlan(INITIAL_RECIPES, { lunch: { 1: 15, 2: 15, 3: 15, 4: 15, 5: 15, 6: 30, 0: 45 }, dinner: { 1: 30, 2: 30, 3: 30, 4: 30, 5: 30, 6: 45, 0: 60 } }));
+      // Générer un plan initial et le sauvegarder avec les vrais UUIDs
+      const baseRecipes = recipesData || INITIAL_RECIPES;
+      const newPlan = generateSmartPlan(baseRecipes, defaultTimes);
+      setPlan(newPlan);
+      // Sauvegarder en DB pour que le plan soit stable aux reconnexions
+      const rows = [];
+      newPlan.forEach(day => {
+        const dateStr = day.date.toISOString().split('T')[0];
+        if (day.lunchRecipe) rows.push({ foyer_id: foyerId, date: dateStr, repas_type: 'midi', recette_id: day.lunchRecipe.id, is_reste: day.isResteMidi || false });
+        if (day.dinnerRecipe) rows.push({ foyer_id: foyerId, date: dateStr, repas_type: 'soir', recette_id: day.dinnerRecipe.id, is_reste: false });
+      });
+      if (rows.length > 0) {
+        await supabase.from('planification').upsert(rows, { onConflict: 'foyer_id,date,repas_type' });
+      }
     }
   };
 
@@ -281,12 +312,14 @@ export default function App() {
     if (data) {
       const checked = {};
       const loadedCustoms = [];
-      data.forEach(item => { 
+      data.forEach(item => {
+        // Restaurer le statut coché pour tous les items
+        if (item.coche) checked[item.ingredient_nom] = true;
+        // Charger les articles personnalisés
         if (item.ingredient_nom.startsWith('[CUSTOM]')) {
           const nom = item.ingredient_nom.substring(8);
           loadedCustoms.push({ id: item.ingredient_nom, nom, quantite: '', unite: '', rayon: item.rayon || 'Divers', isCustom: true });
         }
-        if (item.coche) checked[item.ingredient_nom] = true; 
       });
       setCheckedItems(checked);
       setCustomItems(loadedCustoms);
@@ -326,6 +359,61 @@ export default function App() {
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
+  };
+
+  const handleLeaveFoyer = async () => {
+    setFoyerActionLoading(true);
+    const { error } = await supabase.from('profiles').update({ foyer_id: null }).eq('id', user.id);
+    setFoyerActionLoading(false);
+    if (error) { setJoinError(error.message); return; }
+    setFoyer(null);
+    setRecipes(INITIAL_RECIPES);
+    setPlan([]);
+    setFoyerAction(null);
+  };
+
+  const handleDeleteFoyer = async () => {
+    setFoyerActionLoading(true);
+    const { error } = await supabase.rpc('delete_foyer', { p_foyer_id: foyer.id });
+    setFoyerActionLoading(false);
+    if (error) { setJoinError(error.message); return; }
+    setFoyer(null);
+    setRecipes(INITIAL_RECIPES);
+    setPlan([]);
+    setFoyerAction(null);
+  };
+
+  const handleJoinOtherFoyer = async (e) => {
+    e.preventDefault();
+    setJoinError('');
+    setFoyerActionLoading(true);
+
+    const { data: foyers, error: foyerErr } = await supabase
+      .from('foyers')
+      .select()
+      .eq('code_invitation', joinCode.trim().toUpperCase());
+
+    if (foyerErr || !foyers?.length) {
+      setJoinError('Code invalide. Vérifiez le code partagé.');
+      setFoyerActionLoading(false);
+      return;
+    }
+
+    const newFoyer = foyers[0];
+    // Quitter l'ancien foyer et rejoindre le nouveau
+    const { error: profileErr } = await supabase
+      .from('profiles')
+      .update({ foyer_id: newFoyer.id })
+      .eq('id', user.id);
+
+    setFoyerActionLoading(false);
+    if (profileErr) { setJoinError(profileErr.message); return; }
+
+    setFoyer(newFoyer);
+    await loadRecettes(newFoyer.id);
+    await loadPlanification(newFoyer.id);
+    setJoinCode('');
+    setFoyerAction(null);
   };
 
   // =============================================
@@ -498,13 +586,18 @@ export default function App() {
   };
 
   const toggleCourse = async (key) => {
-    const newChecked = { ...checkedItems, [key]: !checkedItems[key] };
-    setCheckedItems(newChecked);
+    const isNowChecked = !checkedItems[key];
+    setCheckedItems(prev => ({ ...prev, [key]: isNowChecked }));
     if (foyer) {
-      await supabase.from('liste_courses').upsert({
-        foyer_id: foyer.id, ingredient_nom: key, coche: newChecked[key],
+      // Supprimer l'ancienne entrée puis réinsérer (évite le besoin de contrainte UNIQUE)
+      await supabase.from('liste_courses')
+        .delete()
+        .eq('foyer_id', foyer.id)
+        .eq('ingredient_nom', key);
+      await supabase.from('liste_courses').insert({
+        foyer_id: foyer.id, ingredient_nom: key, coche: isNowChecked,
         quantite: 1, unite: '', rayon: 'Épicerie salée'
-      }, { onConflict: 'foyer_id,ingredient_nom' });
+      });
     }
   };
 
@@ -512,8 +605,7 @@ export default function App() {
     e.preventDefault();
     const name = newItemName.trim();
     if (!name) return;
-    
-    // Check if duplicate maybe
+
     const dbKey = `[CUSTOM]${name}`;
     const isDuplicate = customItems.some(i => i.id === dbKey);
     if (isDuplicate) return;
@@ -523,15 +615,57 @@ export default function App() {
     setNewItemName('');
 
     if (foyer) {
-      await supabase.from('liste_courses').upsert({
-        foyer_id: foyer.id, 
-        ingredient_nom: dbKey, 
+      // Supprimer d'abord si existait déjà (évite doublons), puis insérer
+      await supabase.from('liste_courses').delete()
+        .eq('foyer_id', foyer.id).eq('ingredient_nom', dbKey);
+      await supabase.from('liste_courses').insert({
+        foyer_id: foyer.id,
+        ingredient_nom: dbKey,
         coche: false,
-        quantite: 1, 
-        unite: '', 
+        quantite: 1,
+        unite: '',
         rayon: newItemRayon
-      }, { onConflict: 'foyer_id,ingredient_nom' });
+      });
     }
+  };
+
+  const saveShoppingList = async () => {
+    if (!foyer) return;
+    // Supprimer toutes les entrées existantes du foyer
+    await supabase.from('liste_courses').delete().eq('foyer_id', foyer.id);
+
+    // Réinsérer l'état complet : items cochés/décochés + articles personnalisés
+    const rows = [];
+    const shoppingList = getShoppingListByRayon();
+    Object.entries(shoppingList).forEach(([rayon, items]) => {
+      Object.entries(items).forEach(([key, item]) => {
+        rows.push({
+          foyer_id: foyer.id,
+          ingredient_nom: key,
+          coche: checkedItems[key] || false,
+          quantite: item.quantite || 1,
+          unite: item.unite || '',
+          rayon
+        });
+      });
+    });
+    customItems.forEach(item => {
+      if (!rows.find(r => r.ingredient_nom === item.id)) {
+        rows.push({
+          foyer_id: foyer.id,
+          ingredient_nom: item.id,
+          coche: checkedItems[item.id] || false,
+          quantite: 1,
+          unite: '',
+          rayon: item.rayon
+        });
+      }
+    });
+    if (rows.length > 0) {
+      await supabase.from('liste_courses').insert(rows);
+    }
+    setCoursesSaved(true);
+    setTimeout(() => setCoursesSaved(false), 2000);
   };
 
   // =============================================
@@ -574,7 +708,7 @@ export default function App() {
   }
 
   if (!user) return <AuthScreen onAuth={setUser} />;
-  if (user && !foyer) return <FoyerScreen user={user} onFoyerReady={(f) => { setFoyer(f); loadRecettes(f.id); loadPlanification(f.id); }} />;
+  if (user && !foyer) return <FoyerScreen user={user} onFoyerReady={async (f) => { setFoyer(f); const rd = await loadRecettes(f.id); await loadPlanification(f.id, rd); await loadCourses(f.id); }} />;
 
   // =============================================
   // RENDU PRINCIPAL
@@ -631,7 +765,7 @@ export default function App() {
         ].map(tab => (
           <button
             key={tab.id}
-            onClick={() => setCurrentTab(tab.id)}
+            onClick={() => { setCurrentTab(tab.id); setFoyerAction(null); }}
             className={`flex flex-col items-center gap-1 px-4 py-1.5 rounded-xl transition-colors ${currentTab === tab.id ? 'text-amber-600 bg-amber-50' : 'text-gray-400'}`}
           >
             <tab.icon size={22} />
@@ -650,20 +784,39 @@ export default function App() {
     const summary = getNutritionSummary();
     return (
       <div className="p-4 space-y-4">
-        {/* Actions */}
-        <div className="flex gap-2">
-          <button onClick={handleGeneratePlan} className="flex-1 bg-amber-500 text-white font-bold py-3 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2 text-sm">
-            <RefreshCw size={18} /> Générer
-          </button>
-          <button onClick={() => {
-            setPlanSaved(true);
-            setTimeout(() => setPlanSaved(false), 2000);
-          }} className="flex-1 bg-green-500 text-white font-bold py-3 rounded-xl hover:bg-green-600 transition-colors flex items-center justify-center gap-2 text-sm">
-            <Save size={18} /> {planSaved ? 'Enregistré ✅' : 'Enregistrer'}
-          </button>
-          <button onClick={() => setShowNutritionSummary(!showNutritionSummary)} className="w-12 h-12 bg-green-100 text-green-700 rounded-xl flex items-center justify-center hover:bg-green-200 flex-shrink-0">
-            <Leaf size={20} />
-          </button>
+        {/* Actions & Switcher */}
+        <div className="flex flex-col gap-3">
+          <div className="flex justify-between items-center">
+            <div className="flex bg-gray-100 p-1 rounded-xl">
+              <button
+                onClick={() => setPlanViewMode('daily')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${planViewMode === 'daily' ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              >
+                <Calendar size={14} /> Jour
+              </button>
+              <button
+                onClick={() => setPlanViewMode('weekly')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${planViewMode === 'weekly' ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+              >
+                <CalendarDays size={14} /> 14 Jours
+              </button>
+            </div>
+            <button onClick={() => setShowNutritionSummary(!showNutritionSummary)} className="w-10 h-10 bg-green-100 text-green-700 rounded-xl flex items-center justify-center hover:bg-green-200">
+              <Leaf size={18} />
+            </button>
+          </div>
+          
+          <div className="flex gap-2">
+            <button onClick={handleGeneratePlan} className="flex-1 bg-amber-500 text-white font-bold py-2.5 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2 text-sm">
+              <RefreshCw size={16} /> Générer
+            </button>
+            <button onClick={() => {
+              setPlanSaved(true);
+              setTimeout(() => setPlanSaved(false), 2000);
+            }} className="flex-1 bg-green-500 text-white font-bold py-2.5 rounded-xl hover:bg-green-600 transition-colors flex items-center justify-center gap-2 text-sm">
+              <Save size={16} /> {planSaved ? 'Enregistré ✅' : 'Enregistrer'}
+            </button>
+          </div>
         </div>
 
         {/* Résumé nutritionnel */}
@@ -683,32 +836,80 @@ export default function App() {
           </div>
         )}
 
-        {/* Jours */}
-        {plan.map((day, dayIndex) => (
-          <div key={dayIndex} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-            <div className="bg-amber-50 px-4 py-2 border-b border-amber-100">
-              <h3 className="font-black text-amber-800 capitalize text-sm">{formatDate(day.date)}</h3>
+        {/* Vision Journalière */}
+        {planViewMode === 'daily' && plan.length > 0 && (
+          <div className="space-y-4">
+            {/* Pagination */}
+            <div className="flex items-center justify-between bg-white px-3 py-3 rounded-2xl border border-gray-100 shadow-sm">
+              <button 
+                onClick={() => setSelectedDayIndex(Math.max(0, selectedDayIndex - 1))}
+                disabled={selectedDayIndex === 0}
+                className="p-1.5 text-gray-400 hover:text-amber-500 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-30 disabled:hover:text-gray-400 disabled:hover:bg-transparent"
+              >
+                <ChevronLeft size={20} />
+              </button>
+              <div className="text-center">
+                <h3 className="font-black text-amber-800 capitalize text-sm">{formatDate(plan[selectedDayIndex].date)}</h3>
+                <p className="text-[10px] text-gray-500 font-bold mt-0.5">{selectedDayIndex === 0 ? "Aujourd'hui" : `Jour ${selectedDayIndex + 1}/14`}</p>
+              </div>
+              <button 
+                onClick={() => setSelectedDayIndex(Math.min(plan.length - 1, selectedDayIndex + 1))}
+                disabled={selectedDayIndex === plan.length - 1}
+                className="p-1.5 text-gray-400 hover:text-amber-500 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-30 disabled:hover:text-gray-400 disabled:hover:bg-transparent"
+              >
+                <ChevronRight size={20} />
+              </button>
             </div>
-            <div className="p-3 space-y-2">
-              {/* Déjeuner */}
-              <MealCard
-                meal={day.lunchRecipe}
+
+            {/* Repas de la journée */}
+            <div className="space-y-3">
+              <DetailedMealCard 
+                meal={plan[selectedDayIndex].lunchRecipe}
                 type="lunch"
-                isReste={day.isResteMidi}
-                timeLimit={day.timeLunch}
-                onEdit={() => setModalConfig({ dayIndex, mealType: 'lunch', availableTime: day.timeLunch })}
+                isReste={plan[selectedDayIndex].isResteMidi}
+                timeLimit={plan[selectedDayIndex].timeLunch}
+                onEdit={() => setModalConfig({ dayIndex: selectedDayIndex, mealType: 'lunch', availableTime: plan[selectedDayIndex].timeLunch })}
               />
-              {/* Dîner */}
-              <MealCard
-                meal={day.dinnerRecipe}
+              <DetailedMealCard 
+                meal={plan[selectedDayIndex].dinnerRecipe}
                 type="dinner"
-                timeLimit={day.timeDinner}
-                onEdit={() => setModalConfig({ dayIndex, mealType: 'dinner', availableTime: day.timeDinner })}
-                onCuisinerDouble={dayIndex < plan.length - 1 ? () => handleCuisinerDouble(dayIndex) : null}
+                timeLimit={plan[selectedDayIndex].timeDinner}
+                onEdit={() => setModalConfig({ dayIndex: selectedDayIndex, mealType: 'dinner', availableTime: plan[selectedDayIndex].timeDinner })}
+                onCuisinerDouble={selectedDayIndex < plan.length - 1 ? () => handleCuisinerDouble(selectedDayIndex) : null}
               />
             </div>
           </div>
-        ))}
+        )}
+
+        {/* Vision Hebdomadaire (14 j) */}
+        {planViewMode === 'weekly' && (
+          <div className="space-y-4">
+            {plan.map((day, dayIndex) => (
+              <div key={dayIndex} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                <div className="bg-amber-50 px-4 py-2 border-b border-amber-100 flex justify-between items-center">
+                  <h3 className="font-black text-amber-800 capitalize text-sm">{formatDate(day.date)}</h3>
+                  {dayIndex === 0 && <span className="text-[10px] font-bold text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">Aujourd'hui</span>}
+                </div>
+                <div className="p-3 space-y-2">
+                  <MealCard
+                    meal={day.lunchRecipe}
+                    type="lunch"
+                    isReste={day.isResteMidi}
+                    timeLimit={day.timeLunch}
+                    onEdit={() => setModalConfig({ dayIndex, mealType: 'lunch', availableTime: day.timeLunch })}
+                  />
+                  <MealCard
+                    meal={day.dinnerRecipe}
+                    type="dinner"
+                    timeLimit={day.timeDinner}
+                    onEdit={() => setModalConfig({ dayIndex, mealType: 'dinner', availableTime: day.timeDinner })}
+                    onCuisinerDouble={dayIndex < plan.length - 1 ? () => handleCuisinerDouble(dayIndex) : null}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -846,10 +1047,7 @@ export default function App() {
         {/* Bouton de sauvegarde globale */}
         <div className="flex justify-between items-center bg-white p-3 rounded-2xl shadow-sm border border-gray-100">
           <span className="text-sm font-bold text-gray-700">Votre liste de courses</span>
-          <button onClick={() => {
-            setCoursesSaved(true);
-            setTimeout(() => setCoursesSaved(false), 2000);
-          }} className="bg-amber-100 text-amber-700 px-4 py-2 rounded-xl text-xs font-bold hover:bg-amber-200 transition-colors flex items-center gap-2">
+          <button onClick={saveShoppingList} className="bg-amber-100 text-amber-700 px-4 py-2 rounded-xl text-xs font-bold hover:bg-amber-200 transition-colors flex items-center gap-2">
             <Save size={14} /> {coursesSaved ? 'Enregistrée ✅' : 'Enregistrer'}
           </button>
         </div>
@@ -926,22 +1124,138 @@ export default function App() {
           <h2 className="font-black text-gray-800 mb-3 flex items-center gap-2">
             <Home size={18} className="text-amber-500" /> Votre Foyer
           </h2>
-          <div className="space-y-2">
-            <p className="text-sm text-gray-600">{foyer?.nom}</p>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2">
-                <p className="text-xs text-gray-500">Code d'invitation</p>
-                <p className="font-black text-gray-800 tracking-widest">{foyer?.code_invitation}</p>
+
+          {/* Infos foyer */}
+          {foyerAction === null && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-bold text-gray-800">{foyer?.nom}</p>
+                <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
+                  {foyerMembersCount} membre{foyerMembersCount > 1 ? 's' : ''}
+                </span>
               </div>
+              {foyerMembers.length > 0 && (
+                <div className="space-y-1.5">
+                  {foyerMembers.map(member => (
+                    <div key={member.id} className="flex items-center gap-2">
+                      <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 ${member.id === user.id ? 'bg-amber-400' : 'bg-gray-200'}`}>
+                        <span className={`text-xs font-bold ${member.id === user.id ? 'text-white' : 'text-gray-600'}`}>
+                          {(member.nom || member.email || '?')[0].toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{member.nom || member.email}</p>
+                        {member.nom && <p className="text-xs text-gray-400 truncate">{member.email}</p>}
+                      </div>
+                      {member.id === user.id && (
+                        <span className="ml-auto text-[10px] text-amber-600 font-bold">Vous</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <div className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2">
+                  <p className="text-xs text-gray-500">Code d'invitation</p>
+                  <p className="font-black text-gray-800 tracking-widest">{foyer?.code_invitation}</p>
+                </div>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(foyer?.code_invitation); }}
+                  className="w-12 h-12 bg-amber-100 text-amber-700 rounded-xl flex items-center justify-center hover:bg-amber-200"
+                >
+                  <Copy size={18} />
+                </button>
+              </div>
+              <p className="text-xs text-gray-400">Partagez ce code avec votre partenaire pour synchroniser l'application.</p>
+
+              {/* Actions */}
+              <div className="pt-2 space-y-2">
+                <button
+                  onClick={() => { setFoyerAction('join'); setJoinCode(''); setJoinError(''); }}
+                  className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-700 font-bold py-2.5 rounded-xl hover:bg-blue-100 transition-colors text-sm"
+                >
+                  <Users size={16} /> Rejoindre un autre foyer
+                </button>
+                <button
+                  onClick={() => { setFoyerAction('leave'); setJoinError(''); }}
+                  className="w-full flex items-center justify-center gap-2 bg-orange-50 text-orange-600 font-bold py-2.5 rounded-xl hover:bg-orange-100 transition-colors text-sm"
+                >
+                  <ArrowLeft size={16} /> Quitter ce foyer
+                </button>
+                <button
+                  onClick={() => { setFoyerAction('delete'); setJoinError(''); }}
+                  className="w-full flex items-center justify-center gap-2 bg-red-50 text-red-600 font-bold py-2.5 rounded-xl hover:bg-red-100 transition-colors text-sm"
+                >
+                  <Trash2 size={16} /> Supprimer ce foyer
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Rejoindre un autre foyer */}
+          {foyerAction === 'join' && (
+            <div>
+              <button onClick={() => setFoyerAction(null)} className="text-gray-400 text-sm mb-3 hover:text-gray-600">← Retour</button>
+              <p className="text-sm text-gray-600 mb-3">Entrez le code d'invitation du foyer à rejoindre. Vous quitterez automatiquement votre foyer actuel.</p>
+              {joinError && <div className="bg-red-50 text-red-700 text-sm rounded-xl p-3 mb-3">{joinError}</div>}
+              <form onSubmit={handleJoinOtherFoyer} className="space-y-3">
+                <input
+                  type="text"
+                  value={joinCode}
+                  onChange={e => setJoinCode(e.target.value.toUpperCase())}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 tracking-widest font-bold text-center text-lg"
+                  placeholder="XXXXXXXX"
+                  maxLength={8}
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={foyerActionLoading}
+                  className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50 text-sm"
+                >
+                  {foyerActionLoading ? 'Vérification...' : 'Rejoindre ce foyer'}
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* Quitter le foyer */}
+          {foyerAction === 'leave' && (
+            <div>
+              <button onClick={() => setFoyerAction(null)} className="text-gray-400 text-sm mb-3 hover:text-gray-600">← Retour</button>
+              <div className="bg-orange-50 rounded-xl p-3 mb-4">
+                <p className="text-sm font-bold text-orange-800 mb-1">Quitter "{foyer?.nom}" ?</p>
+                <p className="text-xs text-orange-700">Vous perdrez l'accès aux recettes et au planning de ce foyer. Vous pourrez en rejoindre ou créer un nouveau.</p>
+              </div>
+              {joinError && <div className="bg-red-50 text-red-700 text-sm rounded-xl p-3 mb-3">{joinError}</div>}
               <button
-                onClick={() => { navigator.clipboard.writeText(foyer?.code_invitation); }}
-                className="w-12 h-12 bg-amber-100 text-amber-700 rounded-xl flex items-center justify-center hover:bg-amber-200"
+                onClick={handleLeaveFoyer}
+                disabled={foyerActionLoading}
+                className="w-full bg-orange-500 text-white font-bold py-3 rounded-xl hover:bg-orange-600 transition-colors disabled:opacity-50 text-sm"
               >
-                <Copy size={18} />
+                {foyerActionLoading ? 'En cours...' : 'Confirmer — Quitter le foyer'}
               </button>
             </div>
-            <p className="text-xs text-gray-400">Partagez ce code avec votre partenaire pour synchroniser l'application.</p>
-          </div>
+          )}
+
+          {/* Supprimer le foyer */}
+          {foyerAction === 'delete' && (
+            <div>
+              <button onClick={() => setFoyerAction(null)} className="text-gray-400 text-sm mb-3 hover:text-gray-600">← Retour</button>
+              <div className="bg-red-50 rounded-xl p-3 mb-4">
+                <p className="text-sm font-bold text-red-800 mb-1">Supprimer "{foyer?.nom}" ?</p>
+                <p className="text-xs text-red-700">Cette action est irréversible. Toutes les recettes, le planning et les courses seront supprimés. Les {foyerMembersCount} membre{foyerMembersCount > 1 ? 's' : ''} seront déconnectés du foyer.</p>
+              </div>
+              {joinError && <div className="bg-red-50 text-red-700 text-sm rounded-xl p-3 mb-3">{joinError}</div>}
+              <button
+                onClick={handleDeleteFoyer}
+                disabled={foyerActionLoading}
+                className="w-full bg-red-600 text-white font-bold py-3 rounded-xl hover:bg-red-700 transition-colors disabled:opacity-50 text-sm"
+              >
+                {foyerActionLoading ? 'Suppression...' : 'Confirmer — Supprimer définitivement'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Temps disponibles */}
@@ -1221,6 +1535,75 @@ function ShoppingItem({ itemKey, item, checked, onToggle }) {
       <span className={`flex-1 text-sm font-medium text-gray-700 ${checked ? 'line-through' : ''}`}>{item.nom}</span>
       {item.quantite && (
         <span className="text-xs text-gray-400">{Math.round(Number(item.quantite) * 10) / 10} {item.unite}</span>
+      )}
+    </div>
+  );
+}
+
+function DetailedMealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDouble }) {
+  const isLunch = type === 'lunch';
+  
+  return (
+    <div className={`flex flex-col gap-3 p-4 rounded-2xl shadow-sm border ${isReste ? 'bg-green-50/50 border-green-100' : 'bg-white border-gray-100'}`}>
+      <div className="flex justify-between items-start">
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isLunch ? 'bg-yellow-100 text-yellow-600' : 'bg-indigo-100 text-indigo-600'}`}>
+            {isLunch ? <Sun size={20} /> : <Moon size={20} />}
+          </div>
+          <div>
+            <div className="flex items-center gap-1.5">
+              <p className="font-black text-gray-800 text-sm">{isLunch ? 'Déjeuner' : 'Dîner'}</p>
+              {isReste && <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-bold">Restes ♻️</span>}
+            </div>
+            <p className="text-[10px] text-gray-400 font-medium">Temps limité : {timeLimit} min</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button onClick={onEdit} className="p-2 text-gray-400 hover:text-amber-500 hover:bg-amber-50 rounded-xl transition-colors">
+            <Edit2 size={16} />
+          </button>
+          {!isLunch && onCuisinerDouble && meal && (
+            <button onClick={onCuisinerDouble} title="Cuisiner double pour demain midi" className="p-2 text-green-600 bg-green-50 hover:bg-green-100 rounded-xl text-xs font-black transition-colors">
+              x2
+            </button>
+          )}
+        </div>
+      </div>
+
+      {meal ? (
+        <div className="mt-1 pt-3 border-t border-gray-100/60">
+          <h4 className="font-bold text-gray-800 text-base mb-2">{meal.nom}</h4>
+          
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <span className="text-[10px] bg-gray-100 text-gray-600 px-2 py-1 rounded-lg flex items-center gap-1 font-bold"><Clock size={12} /> {meal.prep_time}m prép.</span>
+            <span className="text-[10px] bg-gray-100 text-gray-600 px-2 py-1 rounded-lg flex items-center gap-1 font-bold"><Clock size={12} /> {meal.cook_time}m cuis.</span>
+            {meal.tags?.map(tag => {
+              const info = getTagInfo(tag) || {};
+              return <span key={tag} className={`text-[10px] px-2 py-1 rounded-lg font-bold ${info.color}`}>{info.emoji} {info.label}</span>;
+            })}
+          </div>
+
+          {(meal.ingredients && meal.ingredients.length > 0) && (
+            <div className="mb-2">
+              <p className="text-[10px] text-gray-500 font-bold uppercase mb-1">Ingrédients clés</p>
+              <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded-xl leading-relaxed">
+                {meal.ingredients.map(ing => {
+                  const qte = ing.quantite ? `${Math.round(ing.quantite * 10) / 10}` : '';
+                  const unit = ing.unite ? ` ${ing.unite}` : '';
+                  const spacing = (qte || unit) ? ' ' : '';
+                  return `${qte}${unit}${spacing}${ing.nom}`;
+                }).join(' • ')}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="py-4 text-center border-t border-gray-50 mt-1">
+          <p className="text-sm text-gray-400 font-medium">Aucun repas planifié</p>
+          <button onClick={onEdit} className="mt-2 text-xs font-bold text-amber-500 hover:text-amber-600">
+            + Sélectionner une recette
+          </button>
+        </div>
       )}
     </div>
   );
