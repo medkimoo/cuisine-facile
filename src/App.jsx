@@ -549,6 +549,13 @@ export default function App() {
     return counts;
   };
 
+  const saveSettings = async () => {
+    if (!foyer) return;
+    await supabase.from('foyers').update({ temps_defaut_midi: defaultTimes.lunch[1], temps_defaut_soir: defaultTimes.dinner[1] }).eq('id', foyer.id);
+    setSettingsSaved(true);
+    setTimeout(() => setSettingsSaved(false), 2000);
+  };
+
   // =============================================
   // AUTH GUARDS
   // =============================================
@@ -907,15 +914,6 @@ export default function App() {
   // =============================================
   // ONGLET RÉGLAGES
   // =============================================
-
-  const saveSettings = async () => {
-    if (!foyer) return;
-    const updatedSettings = { ...(foyer.settings || {}), defaultTimes };
-    await supabase.from('foyers').update({ settings: updatedSettings }).eq('id', foyer.id);
-    setFoyer({ ...foyer, settings: updatedSettings });
-    setSettingsSaved(true);
-    setTimeout(() => setSettingsSaved(false), 2000);
-  };
 
   function renderSettingsTab() {
     const DAYS = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
