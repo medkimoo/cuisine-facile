@@ -65,13 +65,13 @@ const formatDateShort = (date) => {
 const getTagInfo = (tagId) => TAGS.find(t => t.id === tagId) || {};
 const getRayonInfo = (rayonId) => RAYONS.find(r => r.id === rayonId) || { emoji: '🛒', label: rayonId };
 
-const generateSmartPlan = (recipes, defaultTimes) => {
+const generateSmartPlan = (recipes, defaultTimes, startDate = null, numDays = 14) => {
   const plan = [];
-  const today = new Date();
+  const today = startDate ? new Date(startDate) : new Date();
   const meatTags = ['Viande'];
   let meatCount = 0;
 
-  for (let i = 0; i < 14; i++) {
+  for (let i = 0; i < numDays; i++) {
     const date = new Date(today);
     date.setDate(today.getDate() + i);
     const dayOfWeek = date.getDay();
@@ -137,6 +137,10 @@ export default function App() {
 
   // Résumé nutritionnel
   const [showNutritionSummary, setShowNutritionSummary] = useState(false);
+  const [showGenerateModal, setShowGenerateModal] = useState(false);
+  const [generateStartDate, setGenerateStartDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [generateEndDate, setGenerateEndDate] = useState(() => { const d = new Date(); d.setDate(d.getDate() + 13); return d.toISOString().split('T')[0]; });
+  const [recipeDetailModal, setRecipeDetailModal] = useState(null);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [planSaved, setPlanSaved] = useState(false);
   const [coursesSaved, setCoursesSaved] = useState(false);
@@ -420,9 +424,13 @@ export default function App() {
   // LOGIQUE PLANIFICATION
   // =============================================
 
-  const handleGeneratePlan = () => {
-    const newPlan = generateSmartPlan(recipes, defaultTimes);
+  const handleGeneratePlan = (startDate, endDate) => {
+    const start = new Date(startDate + 'T00:00:00');
+    const end = new Date(endDate + 'T00:00:00');
+    const numDays = Math.max(1, Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1);
+    const newPlan = generateSmartPlan(recipes, defaultTimes, start, numDays);
     setPlan(newPlan);
+    setShowGenerateModal(false);
     if (foyer) savePlanToSupabase(newPlan, foyer.id);
   };
 
@@ -726,6 +734,8 @@ export default function App() {
       {/* Modales */}
       {modalConfig && renderReplaceModal()}
       {isFormOpen && editingRecipe && renderRecipeForm()}
+      {showGenerateModal && renderGenerateModal()}
+      {recipeDetailModal && renderRecipeDetailModal()}
 
       {/* Header */}
       <header className="bg-white px-4 pt-safe pt-4 pb-3 flex justify-between items-center border-b border-gray-100 shadow-sm">
@@ -798,7 +808,7 @@ export default function App() {
                 onClick={() => setPlanViewMode('weekly')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${planViewMode === 'weekly' ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
               >
-                <CalendarDays size={14} /> 14 Jours
+                <CalendarDays size={14} /> Période
               </button>
             </div>
             <button onClick={() => setShowNutritionSummary(!showNutritionSummary)} className="w-10 h-10 bg-green-100 text-green-700 rounded-xl flex items-center justify-center hover:bg-green-200">
@@ -807,7 +817,7 @@ export default function App() {
           </div>
           
           <div className="flex gap-2">
-            <button onClick={handleGeneratePlan} className="flex-1 bg-amber-500 text-white font-bold py-2.5 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2 text-sm">
+            <button onClick={() => setShowGenerateModal(true)} className="flex-1 bg-amber-500 text-white font-bold py-2.5 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2 text-sm">
               <RefreshCw size={16} /> Générer
             </button>
             <button onClick={() => {
@@ -822,7 +832,7 @@ export default function App() {
         {/* Résumé nutritionnel */}
         {showNutritionSummary && (
           <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm">
-            <h3 className="font-bold text-gray-700 text-sm mb-3">Équilibre alimentaire (14j)</h3>
+            <h3 className="font-bold text-gray-700 text-sm mb-3">Équilibre alimentaire ({plan.length}j)</h3>
             <div className="flex flex-wrap gap-2">
               <span className="text-sm">🥩 {summary.Viande} viande</span>
               <span className="text-sm">🐟 {summary.Poisson} poisson</span>
@@ -850,7 +860,7 @@ export default function App() {
               </button>
               <div className="text-center">
                 <h3 className="font-black text-amber-800 capitalize text-sm">{formatDate(plan[selectedDayIndex].date)}</h3>
-                <p className="text-[10px] text-gray-500 font-bold mt-0.5">{selectedDayIndex === 0 ? "Aujourd'hui" : `Jour ${selectedDayIndex + 1}/14`}</p>
+                <p className="text-[10px] text-gray-500 font-bold mt-0.5">{selectedDayIndex === 0 ? "Aujourd'hui" : `Jour ${selectedDayIndex + 1}/${plan.length}`}</p>
               </div>
               <button 
                 onClick={() => setSelectedDayIndex(Math.min(plan.length - 1, selectedDayIndex + 1))}
@@ -863,19 +873,21 @@ export default function App() {
 
             {/* Repas de la journée */}
             <div className="space-y-3">
-              <DetailedMealCard 
+              <DetailedMealCard
                 meal={plan[selectedDayIndex].lunchRecipe}
                 type="lunch"
                 isReste={plan[selectedDayIndex].isResteMidi}
                 timeLimit={plan[selectedDayIndex].timeLunch}
                 onEdit={() => setModalConfig({ dayIndex: selectedDayIndex, mealType: 'lunch', availableTime: plan[selectedDayIndex].timeLunch })}
+                onViewDetail={plan[selectedDayIndex].lunchRecipe ? () => setRecipeDetailModal({ recipe: plan[selectedDayIndex].lunchRecipe, dayDate: plan[selectedDayIndex].date, mealType: 'lunch', persons: plan[selectedDayIndex].lunchRecipe.portions_defaut || 2 }) : null}
               />
-              <DetailedMealCard 
+              <DetailedMealCard
                 meal={plan[selectedDayIndex].dinnerRecipe}
                 type="dinner"
                 timeLimit={plan[selectedDayIndex].timeDinner}
                 onEdit={() => setModalConfig({ dayIndex: selectedDayIndex, mealType: 'dinner', availableTime: plan[selectedDayIndex].timeDinner })}
                 onCuisinerDouble={selectedDayIndex < plan.length - 1 ? () => handleCuisinerDouble(selectedDayIndex) : null}
+                onViewDetail={plan[selectedDayIndex].dinnerRecipe ? () => setRecipeDetailModal({ recipe: plan[selectedDayIndex].dinnerRecipe, dayDate: plan[selectedDayIndex].date, mealType: 'dinner', persons: plan[selectedDayIndex].dinnerRecipe.portions_defaut || 2 }) : null}
               />
             </div>
           </div>
@@ -897,6 +909,7 @@ export default function App() {
                     isReste={day.isResteMidi}
                     timeLimit={day.timeLunch}
                     onEdit={() => setModalConfig({ dayIndex, mealType: 'lunch', availableTime: day.timeLunch })}
+                    onViewDetail={day.lunchRecipe ? () => setRecipeDetailModal({ recipe: day.lunchRecipe, dayDate: day.date, mealType: 'lunch', persons: day.lunchRecipe.portions_defaut || 2 }) : null}
                   />
                   <MealCard
                     meal={day.dinnerRecipe}
@@ -904,6 +917,7 @@ export default function App() {
                     timeLimit={day.timeDinner}
                     onEdit={() => setModalConfig({ dayIndex, mealType: 'dinner', availableTime: day.timeDinner })}
                     onCuisinerDouble={dayIndex < plan.length - 1 ? () => handleCuisinerDouble(dayIndex) : null}
+                    onViewDetail={day.dinnerRecipe ? () => setRecipeDetailModal({ recipe: day.dinnerRecipe, dayDate: day.date, mealType: 'dinner', persons: day.dinnerRecipe.portions_defaut || 2 }) : null}
                   />
                 </div>
               </div>
@@ -1478,13 +1492,159 @@ export default function App() {
       </div>
     );
   }
+
+  // =============================================
+  // MODALE GÉNÉRATION PLANNING
+  // =============================================
+
+  function renderGenerateModal() {
+    const numDays = generateStartDate && generateEndDate
+      ? Math.max(1, Math.round((new Date(generateEndDate) - new Date(generateStartDate)) / (1000 * 60 * 60 * 24)) + 1)
+      : 0;
+    const isValid = generateStartDate && generateEndDate && generateEndDate >= generateStartDate;
+
+    return (
+      <div className="fixed inset-0 bg-gray-900/60 z-50 flex flex-col justify-end sm:justify-center sm:p-4">
+        <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-md mx-auto shadow-2xl overflow-hidden">
+          <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+            <div>
+              <h3 className="font-bold text-gray-800">Générer le planning</h3>
+              <p className="text-xs text-gray-500">Choisissez votre période</p>
+            </div>
+            <button onClick={() => setShowGenerateModal(false)} className="p-2 bg-gray-200 text-gray-600 rounded-full hover:bg-gray-300"><X size={20} /></button>
+          </div>
+          <div className="p-5 space-y-4">
+            <div>
+              <label className="text-xs font-bold text-gray-500 uppercase block mb-1.5">Date de début</label>
+              <input
+                type="date"
+                value={generateStartDate}
+                onChange={e => setGenerateStartDate(e.target.value)}
+                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-gray-500 uppercase block mb-1.5">Date de fin</label>
+              <input
+                type="date"
+                value={generateEndDate}
+                min={generateStartDate}
+                onChange={e => setGenerateEndDate(e.target.value)}
+                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              />
+            </div>
+            {isValid && (
+              <p className="text-xs text-center text-amber-700 bg-amber-50 rounded-xl py-2 font-bold">
+                {numDays} jour{numDays > 1 ? 's' : ''} à planifier
+              </p>
+            )}
+            <button
+              onClick={() => handleGeneratePlan(generateStartDate, generateEndDate)}
+              disabled={!isValid}
+              className="w-full bg-amber-500 text-white font-bold py-3 rounded-xl hover:bg-amber-600 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              <RefreshCw size={16} /> Générer le planning
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =============================================
+  // MODALE DÉTAIL RECETTE
+  // =============================================
+
+  function renderRecipeDetailModal() {
+    const { recipe, dayDate, mealType, persons } = recipeDetailModal;
+    const basePortions = recipe.portions_defaut || 2;
+    const ratio = persons / basePortions;
+
+    return (
+      <div className="fixed inset-0 bg-gray-900/60 z-50 flex flex-col justify-end sm:justify-center sm:p-4">
+        <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[90vh] flex flex-col mx-auto shadow-2xl overflow-hidden">
+          {/* Header */}
+          <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50 flex-shrink-0">
+            <div className="min-w-0 flex-1">
+              <h3 className="font-bold text-gray-800 truncate">{recipe.nom}</h3>
+              <p className="text-xs text-gray-500 mt-0.5">{formatDate(dayDate)} · {mealType === 'lunch' ? 'Déjeuner' : 'Dîner'}</p>
+            </div>
+            <button onClick={() => setRecipeDetailModal(null)} className="p-2 bg-gray-200 text-gray-600 rounded-full hover:bg-gray-300 flex-shrink-0 ml-3"><X size={20} /></button>
+          </div>
+
+          <div className="overflow-y-auto p-4 space-y-4 flex-grow">
+            {/* Infos rapides */}
+            <div className="flex flex-wrap gap-2">
+              <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-lg flex items-center gap-1 font-bold">
+                <Clock size={12} /> {recipe.prep_time}m prép.
+              </span>
+              {recipe.cook_time > 0 && (
+                <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-lg flex items-center gap-1 font-bold">
+                  <Clock size={12} /> {recipe.cook_time}m cuis.
+                </span>
+              )}
+              {recipe.tags?.map(tag => {
+                const info = TAGS.find(t => t.id === tag) || {};
+                return <span key={tag} className={`text-xs px-2 py-1 rounded-lg font-bold ${info.color}`}>{info.emoji} {info.label}</span>;
+              })}
+            </div>
+
+            {/* Ajustement portions */}
+            <div className="bg-amber-50 rounded-2xl p-4">
+              <p className="text-xs font-bold text-gray-500 uppercase mb-3 text-center">Nombre de personnes</p>
+              <div className="flex items-center justify-center gap-5">
+                <button
+                  onClick={() => setRecipeDetailModal(prev => ({ ...prev, persons: Math.max(1, prev.persons - 1) }))}
+                  className="w-11 h-11 bg-white rounded-xl font-black text-2xl text-amber-600 shadow-sm hover:bg-amber-100 transition-colors flex items-center justify-center"
+                >−</button>
+                <span className="text-4xl font-black text-amber-700 w-12 text-center">{persons}</span>
+                <button
+                  onClick={() => setRecipeDetailModal(prev => ({ ...prev, persons: prev.persons + 1 }))}
+                  className="w-11 h-11 bg-white rounded-xl font-black text-2xl text-amber-600 shadow-sm hover:bg-amber-100 transition-colors flex items-center justify-center"
+                >+</button>
+              </div>
+              <p className="text-center text-xs text-gray-400 mt-2">Recette de base : {basePortions} personne{basePortions > 1 ? 's' : ''}</p>
+            </div>
+
+            {/* Ingrédients ajustés */}
+            {recipe.ingredients?.length > 0 && (
+              <div>
+                <p className="text-xs font-bold text-gray-500 uppercase mb-2">Ingrédients</p>
+                <div className="bg-gray-50 rounded-2xl overflow-hidden divide-y divide-gray-100">
+                  {recipe.ingredients.map((ing, i) => {
+                    const adjustedQty = ing.quantite ? Math.round(ing.quantite * ratio * 10) / 10 : null;
+                    return (
+                      <div key={i} className="flex justify-between items-center px-4 py-2.5">
+                        <span className="text-sm font-medium text-gray-700">{ing.nom}</span>
+                        <span className="text-sm text-gray-500 font-bold ml-4 text-right">
+                          {adjustedQty !== null ? `${adjustedQty}${ing.unite ? ' ' + ing.unite : ''}` : '—'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Instructions */}
+            {recipe.instructions && (
+              <div>
+                <p className="text-xs font-bold text-gray-500 uppercase mb-2">Instructions</p>
+                <p className="text-sm text-gray-700 bg-gray-50 rounded-2xl p-4 leading-relaxed">{recipe.instructions}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 }
 
 // =============================================
 // SOUS-COMPOSANTS
 // =============================================
 
-function MealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDouble }) {
+function MealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDouble, onViewDetail }) {
   const isLunch = type === 'lunch';
   return (
     <div className={`flex items-center gap-3 p-3 rounded-xl ${isReste ? 'bg-green-50 border border-green-100' : 'bg-gray-50'}`}>
@@ -1498,7 +1658,7 @@ function MealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDouble }) 
         </div>
         {meal ? (
           <>
-            <p className="font-bold text-gray-800 text-sm truncate">{meal.nom}</p>
+            <p className="font-bold text-gray-800 text-sm truncate" onClick={onViewDetail} style={onViewDetail ? { cursor: 'pointer' } : {}}>{meal.nom}</p>
             <div className="flex items-center gap-2 mt-0.5">
               <span className="text-[10px] text-gray-400"><Clock size={9} className="inline" /> {meal.prep_time}m</span>
               {meal.tags?.slice(0, 2).map(tag => {
@@ -1540,7 +1700,7 @@ function ShoppingItem({ itemKey, item, checked, onToggle }) {
   );
 }
 
-function DetailedMealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDouble }) {
+function DetailedMealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDouble, onViewDetail }) {
   const isLunch = type === 'lunch';
   
   return (
@@ -1571,8 +1731,11 @@ function DetailedMealCard({ meal, type, isReste, timeLimit, onEdit, onCuisinerDo
       </div>
 
       {meal ? (
-        <div className="mt-1 pt-3 border-t border-gray-100/60">
-          <h4 className="font-bold text-gray-800 text-base mb-2">{meal.nom}</h4>
+        <div className="mt-1 pt-3 border-t border-gray-100/60" onClick={onViewDetail} style={onViewDetail ? { cursor: 'pointer' } : {}}>
+          <h4 className="font-bold text-gray-800 text-base mb-2 flex items-center justify-between">
+            <span>{meal.nom}</span>
+            {onViewDetail && <span className="text-[10px] text-amber-500 font-bold bg-amber-50 px-2 py-0.5 rounded-full flex-shrink-0 ml-2">Voir détails</span>}
+          </h4>
           
           <div className="flex flex-wrap items-center gap-2 mb-3">
             <span className="text-[10px] bg-gray-100 text-gray-600 px-2 py-1 rounded-lg flex items-center gap-1 font-bold"><Clock size={12} /> {meal.prep_time}m prép.</span>

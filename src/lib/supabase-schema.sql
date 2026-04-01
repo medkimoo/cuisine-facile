@@ -14,8 +14,12 @@ create table if not exists foyers (
   temps_defaut_midi integer not null default 30,
   temps_defaut_soir integer not null default 60,
   code_invitation text unique not null default upper(substring(replace(gen_random_uuid()::text, '-', ''), 1, 8)),
+  created_by uuid references auth.users(id) on delete set null,
   created_at timestamptz default now()
 );
+
+-- Migration : ajouter created_by si la table existe déjà
+-- alter table foyers add column if not exists created_by uuid references auth.users(id) on delete set null;
 
 -- =============================================
 -- TABLE: profiles (extension de auth.users)
@@ -116,10 +120,27 @@ alter table liste_courses enable row level security;
 create policy "profiles_own" on profiles
   for all using (auth.uid() = id);
 
--- Foyers : membres du foyer uniquement
+-- Fonction helper pour éviter la récursion RLS (security definer = bypass RLS)
+create or replace function get_my_foyer_id()
+returns uuid language sql security definer stable as $$
+  select foyer_id from profiles where id = auth.uid();
+$$;
+
+-- Profiles : lecture des membres du même foyer (select uniquement)
+create policy "profiles_foyer_members" on profiles
+  for select using (
+    foyer_id is not null and foyer_id = get_my_foyer_id()
+  );
+
+-- Migration : si les politiques existent déjà
+-- drop policy if exists "profiles_foyer_members" on profiles;
+-- drop function if exists get_my_foyer_id();
+
+-- Foyers : membres du foyer uniquement (ou créateur)
 create policy "foyers_member" on foyers
   for all using (
     id in (select foyer_id from profiles where id = auth.uid())
+    or created_by = auth.uid()
   );
 
 -- Recettes : membres du même foyer
@@ -149,6 +170,32 @@ create policy "courses_foyer" on liste_courses
   for all using (
     foyer_id in (select foyer_id from profiles where id = auth.uid())
   );
+
+-- =============================================
+-- FONCTIONS RPC
+-- =============================================
+
+-- Supprime un foyer et détache tous ses membres (Security Definer = bypass RLS)
+create or replace function delete_foyer(p_foyer_id uuid)
+returns void
+language plpgsql
+security definer
+as $$
+begin
+  -- Vérifier que l'appelant est bien membre de ce foyer
+  if not exists (
+    select 1 from profiles where id = auth.uid() and foyer_id = p_foyer_id
+  ) then
+    raise exception 'Non autorisé : vous n''êtes pas membre de ce foyer';
+  end if;
+
+  -- Détacher tous les membres
+  update profiles set foyer_id = null where foyer_id = p_foyer_id;
+
+  -- Supprimer le foyer (cascade sur recettes, planification, liste_courses)
+  delete from foyers where id = p_foyer_id;
+end;
+$$;
 
 -- =============================================
 -- REALTIME

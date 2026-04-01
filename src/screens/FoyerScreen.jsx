@@ -20,7 +20,7 @@ export default function FoyerScreen({ user, onFoyerReady }) {
 
     const { data: foyer, error: foyerErr } = await supabase
       .from('foyers')
-      .insert({ nom: foyerName, code_invitation: code })
+      .insert({ nom: foyerName, code_invitation: code, created_by: user.id })
       .select()
       .single();
 
