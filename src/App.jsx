@@ -500,7 +500,7 @@ export default function App() {
       setEditingRecipe({
         id: `r_${Date.now()}`,
         nom: '', categorie: 'Marocaine', prep_time: 15, cook_time: 20,
-        portions_defaut: 2, tags: [], instructions: '',
+        portions_defaut: (foyer?.nbr_adultes ?? 2) + (foyer?.nbr_enfants ?? 0), tags: [], instructions: '',
         ingredients: [{ nom: '', quantite: '', unite: '', rayon: 'Épicerie salée' }]
       });
     }
@@ -696,6 +696,38 @@ export default function App() {
     await supabase.from('foyers').update({ temps_defaut_midi: defaultTimes.lunch[1], temps_defaut_soir: defaultTimes.dinner[1] }).eq('id', foyer.id);
     setSettingsSaved(true);
     setTimeout(() => setSettingsSaved(false), 2000);
+  };
+
+  const handleNbrAdultesChange = async (e) => {
+    const nbr = parseInt(e.target.value) || 0;
+    if (!foyer) return;
+    const newFoyer = { ...foyer, nbr_adultes: nbr };
+    setFoyer(newFoyer);
+    await supabase.from('foyers').update({ nbr_adultes: nbr }).eq('id', foyer.id);
+  };
+
+  const handleNbrEnfantsChange = async (e) => {
+    const nbr = parseInt(e.target.value) || 0;
+    if (!foyer) return;
+    let oldAges = Array.isArray(foyer.age_enfants) ? foyer.age_enfants : [];
+    let newAges = [...oldAges];
+    if (nbr > newAges.length) {
+      newAges = [...newAges, ...Array(nbr - newAges.length).fill(0)];
+    } else if (nbr < newAges.length) {
+      newAges = newAges.slice(0, nbr);
+    }
+    const newFoyer = { ...foyer, nbr_enfants: nbr, age_enfants: newAges };
+    setFoyer(newFoyer);
+    await supabase.from('foyers').update({ nbr_enfants: nbr, age_enfants: newAges }).eq('id', foyer.id);
+  };
+
+  const handleAgeEnfantChange = async (index, ageStr) => {
+    if (!foyer) return;
+    let newAges = Array.isArray(foyer.age_enfants) ? [...foyer.age_enfants] : [];
+    newAges[index] = parseInt(ageStr) || 0;
+    const newFoyer = { ...foyer, age_enfants: newAges };
+    setFoyer(newFoyer);
+    await supabase.from('foyers').update({ age_enfants: newAges }).eq('id', foyer.id);
   };
 
   // =============================================
@@ -1270,6 +1302,70 @@ export default function App() {
               </button>
             </div>
           )}
+        </div>
+
+        {/* Composition du foyer */}
+        <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm">
+          <div className="flex justify-between items-center mb-1">
+            <h2 className="font-black text-gray-800 flex items-center gap-2">
+              <Users size={18} className="text-amber-500" /> Composition
+            </h2>
+          </div>
+          <p className="text-xs text-gray-500 mb-4">Définit le nombre de personnes par défaut pour vos recettes.</p>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-bold text-gray-700">Adultes</label>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => handleNbrAdultesChange({ target: { value: Math.max(1, (foyer?.nbr_adultes ?? 2) - 1) } })}
+                  className="w-8 h-8 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center font-bold"
+                >−</button>
+                <span className="font-black text-lg w-4 text-center">{foyer?.nbr_adultes ?? 2}</span>
+                <button
+                  onClick={() => handleNbrAdultesChange({ target: { value: (foyer?.nbr_adultes ?? 2) + 1 } })}
+                  className="w-8 h-8 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center font-bold"
+                >+</button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-bold text-gray-700">Enfants</label>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => handleNbrEnfantsChange({ target: { value: Math.max(0, (foyer?.nbr_enfants ?? 0) - 1) } })}
+                  className="w-8 h-8 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center font-bold"
+                >−</button>
+                <span className="font-black text-lg w-4 text-center">{foyer?.nbr_enfants ?? 0}</span>
+                <button
+                  onClick={() => handleNbrEnfantsChange({ target: { value: (foyer?.nbr_enfants ?? 0) + 1 } })}
+                  className="w-8 h-8 rounded-full bg-gray-100 text-gray-600 flex items-center justify-center font-bold"
+                >+</button>
+              </div>
+            </div>
+            
+            {(foyer?.nbr_enfants ?? 0) > 0 && (
+              <div className="pt-2 border-t border-gray-50 space-y-2 mt-2">
+                <p className="text-xs font-bold text-gray-500 uppercase">Âge des enfants</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {Array.from({ length: foyer?.nbr_enfants ?? 0 }).map((_, idx) => (
+                    <div key={idx} className="flex items-center gap-2 bg-gray-50 p-2 rounded-xl">
+                      <span className="text-xs text-gray-500 font-bold w-12">Enfant {idx + 1}</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="18"
+                        value={((foyer?.age_enfants && Array.isArray(foyer.age_enfants)) ? foyer.age_enfants[idx] : 0) || 0}
+                        onChange={e => handleAgeEnfantChange(idx, e.target.value)}
+                        className="w-16 border border-gray-200 rounded-lg p-1.5 text-xs bg-white text-center font-bold"
+                      />
+                      <span className="text-xs text-gray-400">ans</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Temps disponibles */}

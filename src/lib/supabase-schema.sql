@@ -13,6 +13,9 @@ create table if not exists foyers (
   nom text not null default 'Notre Foyer',
   temps_defaut_midi integer not null default 30,
   temps_defaut_soir integer not null default 60,
+  nbr_adultes integer not null default 2,
+  nbr_enfants integer not null default 0,
+  age_enfants jsonb not null default '[]'::jsonb,
   code_invitation text unique not null default upper(substring(replace(gen_random_uuid()::text, '-', ''), 1, 8)),
   created_by uuid references auth.users(id) on delete set null,
   created_at timestamptz default now()
