@@ -159,32 +159,33 @@ export default function App() {
   // =============================================
 
   useEffect(() => {
-    // onAuthStateChange gère TOUS les cas : session existante, OAuth return, sign in/out
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       console.log('[Auth] Event:', event, 'User:', session?.user?.email || 'none');
 
-      if (session?.user) {
+      if (event === 'SIGNED_IN') {
+        // Retour OAuth Google ou connexion email/password
         setUser(session.user);
-        // Utiliser setTimeout pour éviter un deadlock avec les appels Supabase
-        // pendant le callback onAuthStateChange
+        // Nettoyer l'URL uniquement après confirmation de session (évite d'interférer avec l'échange PKCE)
+        if (window.location.search || window.location.hash) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        // setTimeout pour éviter deadlock avec appels Supabase dans le callback
         setTimeout(() => loadFoyer(session.user.id), 0);
+      } else if (event === 'INITIAL_SESSION') {
+        if (session?.user) {
+          setUser(session.user);
+          setTimeout(() => loadFoyer(session.user.id), 0);
+        } else {
+          setAuthLoading(false);
+        }
       } else if (event === 'SIGNED_OUT') {
         setUser(null);
         setFoyer(null);
         setAuthLoading(false);
-      } else if (event === 'INITIAL_SESSION' && !session) {
-        // Pas de session au démarrage
-        console.log('[Auth] Pas de session active');
-        setAuthLoading(false);
+      } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+        setUser(session.user);
       }
     });
-
-    // Nettoyer l'URL après un retour OAuth (les # et ? params)
-    if (window.location.hash || window.location.search.includes('code=')) {
-      setTimeout(() => {
-        window.history.replaceState({}, '', window.location.pathname);
-      }, 1000);
-    }
 
     return () => subscription.unsubscribe();
   }, []);
